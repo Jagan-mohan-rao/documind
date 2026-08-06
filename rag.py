@@ -1,6 +1,7 @@
 import os
 import uuid
 from pathlib import Path
+from functools import lru_cache
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -27,7 +28,12 @@ def load_and_split(file_path: str):
     return splitter.split_documents(docs)
 
 
+@lru_cache(maxsize=1)
 def get_embeddings():
+    # This model load (import torch + download/load weights) is the single
+    # biggest source of "processing" lag. Previously it ran on every single
+    # "Process document" click; caching means only the FIRST document in a
+    # session pays that cost, every one after is instant.
     return HuggingFaceEmbeddings(model_name=EMBED_MODEL)
 
 
@@ -47,8 +53,15 @@ def build_vectorstore(chunks):
     )
 
 
-PROMPT_TEMPLATE = """You are a helpful assistant answering questions about a document.
-Use ONLY the context below to answer. If the answer isn't in the context, say you don't know.
+PROMPT_TEMPLATE = """You are a precise assistant answering questions about a document.
+Answer using ONLY the context below — never use outside knowledge and never guess.
+Be specific: cite exact figures, names, dates, or clauses from the context where relevant.
+If the answer isn't in the context, say plainly that the document doesn't cover it.
+Use the conversation so far only to resolve follow-up questions (e.g. "the second one",
+"what about after that") — the answer itself must still come only from the context.
+
+Conversation so far:
+{history}
 
 Context:
 {context}
@@ -58,23 +71,41 @@ Question: {question}
 Answer:"""
 
 
-def _call_llm(prompt: str) -> str:
+def _format_history(chat_history, max_turns=3):
+    """Keep the last few Q/A turns so follow-ups have context, without
+    bloating every prompt with the full conversation."""
+    if not chat_history:
+        return "(none yet)"
+    recent = chat_history[-(max_turns * 2):]
+    lines = [f"{'User' if role == 'user' else 'Assistant'}: {msg}" for role, msg in recent]
+    return "\n".join(lines)
+
+
+def _stream_llm(prompt: str):
     from openai import OpenAI
     client = OpenAI(
         api_key=os.getenv("GROQ_API_KEY"),
         base_url="https://api.groq.com/openai/v1",
     )
-    response = client.chat.completions.create(
+    stream = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         max_tokens=500,
+        temperature=0.2,  # lower temperature = more literal, less "creative" drift from the source text
         messages=[{"role": "user", "content": prompt}],
+        stream=True,
     )
-    return response.choices[0].message.content
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
 
 
-def answer_question(vectorstore, question: str, k: int = 4):
+def answer_question_stream(vectorstore, question: str, chat_history=None, k: int = 4):
+    """Returns (token_generator, source_docs). The generator is meant for
+    st.write_stream — the UI shows the answer as it's generated instead of
+    waiting for the whole thing, which is what actually feels slow today."""
     retrieved_docs = vectorstore.similarity_search(question, k=k)
     context = "\n\n---\n\n".join(doc.page_content for doc in retrieved_docs)
-    prompt = PROMPT_TEMPLATE.format(context=context, question=question)
-    answer = _call_llm(prompt)
-    return answer, retrieved_docs
+    history = _format_history(chat_history or [])
+    prompt = PROMPT_TEMPLATE.format(context=context, question=question, history=history)
+    return _stream_llm(prompt), retrieved_docs

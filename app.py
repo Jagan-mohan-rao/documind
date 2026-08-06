@@ -4,7 +4,7 @@ import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
 
-from rag import load_and_split, build_vectorstore, answer_question
+from rag import load_and_split, build_vectorstore, answer_question_stream
 
 st.set_page_config(page_title="DocuMind", page_icon="📄", layout="wide")
 
@@ -100,6 +100,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 .stButton > button:hover { transform: translateY(-1px); box-shadow: 0 6px 26px rgba(193,71,233,0.45); }
 
+[data-testid="stChatMessage"] {
     background: var(--glass-fill) !important;
     border: 1px solid var(--glass-border) !important;
     border-radius: 16px !important;
@@ -107,6 +108,17 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     margin-bottom: 10px;
 }
 [data-testid="stChatMessage"] p { color: var(--text-primary) !important; }
+
+/* Structural fix: push user messages to the right, assistant to the left,
+   like WhatsApp/ChatGPT. Streamlit gives each chat_message a nested avatar
+   with a role-specific testid, so we key off that to flip the row. */
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+    flex-direction: row-reverse;
+    text-align: right;
+}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) [data-testid="stChatMessageContent"] {
+    margin-left: auto;
+}
 
 [data-testid="stChatInput"] textarea {
     background: rgba(255,255,255,0.05) !important;
@@ -187,24 +199,42 @@ with left:
 
 with right:
     st.markdown('<div class="panel-label">02 — Chat</div>', unsafe_allow_html=True)
-    with st.container(border=True):
-        if st.session_state.vectorstore:
+
+    if st.session_state.vectorstore:
+        # Fixed-height container = its own scrollbar. Messages scroll inside
+        # here; everything outside it (like chat_input below) stays put.
+        messages_box = st.container(height=480, border=True)
+        with messages_box:
             for role, message in st.session_state.chat_history:
                 with st.chat_message(role):
                     st.markdown(message)
 
-            question = st.chat_input("Ask a question about the document...")
-            if question:
-                st.session_state.chat_history.append(("user", question))
+        # Called OUTSIDE the scrolling container (and outside any other
+        # nested container) so Streamlit pins it to the bottom of the app
+        # instead of rendering it inline at the top.
+        question = st.chat_input("Ask a question about the document...")
+
+        if question:
+            st.session_state.chat_history.append(("user", question))
+            with messages_box:
                 with st.chat_message("user"):
                     st.markdown(question)
                 with st.chat_message("assistant"):
-                    with st.spinner("Retrieving context and generating answer..."):
-                        answer, sources = answer_question(st.session_state.vectorstore, question)
-                        st.markdown(answer)
-                        with st.expander("Sources used"):
-                            for i, doc in enumerate(sources, 1):
-                                st.markdown(f"[{i}] {doc.page_content[:300]}...")
-                st.session_state.chat_history.append(("assistant", answer))
-        else:
+                    with st.spinner("Searching the document..."):
+                        stream, sources = answer_question_stream(
+                            st.session_state.vectorstore,
+                            question,
+                            chat_history=st.session_state.chat_history,
+                        )
+                    # Renders token-by-token as it arrives instead of waiting
+                    # for the full answer — feels dramatically faster even
+                    # when total generation time is the same.
+                    answer = st.write_stream(stream)
+                    with st.expander("Sources used"):
+                        for i, doc in enumerate(sources, 1):
+                            st.markdown(f"[{i}] {doc.page_content[:300]}...")
+            st.session_state.chat_history.append(("assistant", answer))
+            st.rerun()
+    else:
+        with st.container(border=True):
             st.info("Upload and process a document on the left to start chatting.")
