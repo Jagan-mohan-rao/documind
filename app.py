@@ -48,7 +48,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .block-container { position: relative; z-index: 1; padding-top: 2rem; max-width: 1400px; }
 
 .hero-eyebrow {
-    display: inline-flex; align-items: center; gap: 6px;
+    display: inline-flex; align-items: center; gap: 6px;margin-top:20px;
     font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
     letter-spacing: 0.08em; text-transform: uppercase; color: var(--glow-cyan);
     background: rgba(34,211,238,0.08); border: 1px solid rgba(34,211,238,0.25);
@@ -109,21 +109,10 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 }
 [data-testid="stChatMessage"] p { color: var(--text-primary) !important; }
 
-/* Structural fix: push user messages to the right, assistant to the left,
-   like WhatsApp/ChatGPT. Streamlit gives each chat_message a nested avatar
-   with a role-specific testid, so we key off that to flip the row. */
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
-    flex-direction: row-reverse;
-    text-align: right;
-}
-[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) [data-testid="stChatMessageContent"] {
-    margin-left: auto;
-}
-
 [data-testid="stChatInput"] textarea {
     background: rgba(255,255,255,0.05) !important;
     border: 1px solid var(--glass-border) !important;
-    border-radius: 14px !important;
+    border-radius: 14px !important;padding:20px;
     color: var(--text-primary) !important;
 }
 
@@ -145,7 +134,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
 h1, h2, h3, label, .stMarkdown p { color: var(--text-primary); }
 
-/* Responsive: stack columns on narrow screens */
 @media (max-width: 900px) {
     .hero-title { font-size: 1.8rem; }
 }
@@ -158,7 +146,7 @@ h1, h2, h3, label, .stMarkdown p { color: var(--text-primary); }
 st.markdown("""
 <div class="hero-eyebrow">◆ RAG · Retrieval-Augmented Generation</div>
 <h1 class="hero-title">DocuMind</h1>
-<p class="hero-sub">Upload any document on the left. Ask anything on the right. Answers grounded in what it actually says.</p>
+<p class="hero-sub">Upload any document and Ask anything. Answers grounded in what it actually says.</p>
 <div class="scan-line"></div>
 """, unsafe_allow_html=True)
 
@@ -171,6 +159,22 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "doc_name" not in st.session_state:
     st.session_state.doc_name = None
+
+
+def render_message(role: str, text: str):
+    """User bubble on the right, assistant bubble on the left — WhatsApp/ChatGPT style."""
+    align = "flex-end" if role == "user" else "flex-start"
+    bubble_bg = "rgba(108,99,255,0.28)" if role == "user" else "rgba(255,255,255,0.07)"
+    st.markdown(f"""
+    <div style="display:flex; justify-content:{align}; margin-bottom:10px;">
+        <div style="max-width:78%; background:{bubble_bg}; border:1px solid var(--glass-border);
+                    border-radius:14px; padding:10px 14px; color:var(--text-primary);
+                    font-size:0.95rem; line-height:1.4;">
+            {text}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 
 # ---------------------------------------------------------------------------
 # TWO-COLUMN LAYOUT — LEFT: upload · RIGHT: chat
@@ -188,7 +192,6 @@ with left:
                     tmp.write(uploaded_file.read())
                     tmp_path = tmp.name
                 chunks = load_and_split(tmp_path)
-                # Fresh vectorstore every time — old uploads never bleed into new answers
                 st.session_state.vectorstore = build_vectorstore(chunks)
                 st.session_state.chat_history = []
                 st.session_state.doc_name = uploaded_file.name
@@ -201,40 +204,34 @@ with right:
     st.markdown('<div class="panel-label">02 — Chat</div>', unsafe_allow_html=True)
 
     if st.session_state.vectorstore:
-        # Fixed-height container = its own scrollbar. Messages scroll inside
-        # here; everything outside it (like chat_input below) stays put.
         messages_box = st.container(height=480, border=True)
         with messages_box:
             for role, message in st.session_state.chat_history:
-                with st.chat_message(role):
-                    st.markdown(message)
-
-        # Called OUTSIDE the scrolling container (and outside any other
-        # nested container) so Streamlit pins it to the bottom of the app
-        # instead of rendering it inline at the top.
-        question = st.chat_input("Ask a question about the document...")
-
-        if question:
-            st.session_state.chat_history.append(("user", question))
-            with messages_box:
-                with st.chat_message("user"):
-                    st.markdown(question)
-                with st.chat_message("assistant"):
-                    with st.spinner("Searching the document..."):
-                        stream, sources = answer_question_stream(
-                            st.session_state.vectorstore,
-                            question,
-                            chat_history=st.session_state.chat_history,
-                        )
-                    # Renders token-by-token as it arrives instead of waiting
-                    # for the full answer — feels dramatically faster even
-                    # when total generation time is the same.
-                    answer = st.write_stream(stream)
-                    with st.expander("Sources used"):
-                        for i, doc in enumerate(sources, 1):
-                            st.markdown(f"[{i}] {doc.page_content[:300]}...")
-            st.session_state.chat_history.append(("assistant", answer))
-            st.rerun()
+                render_message(role, message)
     else:
         with st.container(border=True):
             st.info("Upload and process a document on the left to start chatting.")
+
+# ---------------------------------------------------------------------------
+# CHAT INPUT — placed OUTSIDE both columns so Streamlit docks it to the
+# bottom of the whole page, instead of rendering it inline inside a panel.
+# ---------------------------------------------------------------------------
+if st.session_state.vectorstore:
+    question = st.chat_input("Ask a question about the document...")
+
+    if question:
+        st.session_state.chat_history.append(("user", question))
+        with messages_box:
+            render_message("user", question)
+            with st.spinner("Searching the document..."):
+                stream, sources = answer_question_stream(
+                    st.session_state.vectorstore,
+                    question,
+                    chat_history=st.session_state.chat_history,
+                )
+            answer = st.write_stream(stream)
+            with st.expander("Sources used"):
+                for i, doc in enumerate(sources, 1):
+                    st.markdown(f"[{i}] {doc.page_content[:300]}...")
+        st.session_state.chat_history.append(("assistant", answer))
+        st.rerun()
