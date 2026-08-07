@@ -75,7 +75,7 @@ Built as a hands-on exploration of the modern AI-native development stack: LLM A
 ### Setup
 
 ```bash
-git clone https://github.com/<your-username>/documind.git
+git clone https://github.com/jagan-mohan-rao/documind.git
 cd documind
 
 python -m venv venv
